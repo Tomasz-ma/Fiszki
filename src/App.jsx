@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Volume2, X, Minus, Check, BarChart3, Layers, Settings as SettingsIcon, BookOpen, Flame, Plus, Trash2, RotateCcw, ArrowLeftRight } from 'lucide-react';
 
 /* ---------------------------------------------------------------------- */
@@ -179,44 +179,26 @@ export default function App() {
   const [screenState, setScreenState] = useState('question');
   const [sessionStats, setSessionStats] = useState({ reviewed: 0, dontKnow: 0, medium: 0, know: 0 });
 
-  const initializedRef = useRef(false);
-
-  useEffect(() => {
-    (async () => {
-      const [cw, pr, st] = await Promise.all([
-        loadKey('custom-words', []),
-        loadKey('progress-data', {}),
-        loadKey('app-settings', DEFAULT_SETTINGS),
-      ]);
-      setCustomWords(cw);
-      setProgress(pr);
-      setSettings({ ...DEFAULT_SETTINGS, ...st, directions: { ...DEFAULT_SETTINGS.directions, ...(st.directions || {}) } });
-      setLoading(false);
-    })();
-  }, []);
-
-  const allWords = [...BUILTIN_WORDS, ...customWords];
-
-  const buildPool = useCallback(() => {
-    const active = allWords.filter((w) => settings.activeCategories.includes(w.category));
+  function buildPoolFor(wordsArg, settingsArg) {
+    const active = wordsArg.filter((w) => settingsArg.activeCategories.includes(w.category));
     const pool = [];
     active.forEach((w) => {
-      if (settings.directions.enToPl) pool.push({ word: w, direction: 'enToPl' });
-      if (settings.directions.plToEn) pool.push({ word: w, direction: 'plToEn' });
+      if (settingsArg.directions.enToPl) pool.push({ word: w, direction: 'enToPl' });
+      if (settingsArg.directions.plToEn) pool.push({ word: w, direction: 'plToEn' });
     });
     return pool;
-  }, [allWords, settings]);
+  }
 
-  const startSession = useCallback(() => {
+  function buildSessionFor(wordsArg, progressArg, settingsArg) {
     const now = new Date();
-    const pool = buildPool();
+    const pool = buildPoolFor(wordsArg, settingsArg);
 
     const dueItems = [];
     const newItems = [];
 
     pool.forEach((item) => {
       const key = progressKey(item.direction, item.word.id);
-      const p = progress[key];
+      const p = progressArg[key];
       if (!p || p.status === STATUS.NEW) {
         newItems.push(item);
       } else if (new Date(p.dueAt) <= now) {
@@ -225,37 +207,51 @@ export default function App() {
     });
 
     dueItems.sort((a, b) => new Date(a.dueAt) - new Date(b.dueAt));
-    const limitedNew = shuffle(newItems).slice(0, settings.dailyGoal);
+    const limitedNew = shuffle(newItems).slice(0, settingsArg.dailyGoal);
+    return interleave(dueItems, limitedNew, 3);
+  }
 
-    const combined = interleave(dueItems, limitedNew, 3);
+  useEffect(() => {
+    (async () => {
+      const [cw, pr, stRaw] = await Promise.all([
+        loadKey('custom-words', []),
+        loadKey('progress-data', {}),
+        loadKey('app-settings', DEFAULT_SETTINGS),
+      ]);
+      const st = { ...DEFAULT_SETTINGS, ...stRaw, directions: { ...DEFAULT_SETTINGS.directions, ...(stRaw.directions || {}) } };
+      const wordsLocal = [...BUILTIN_WORDS, ...cw];
 
-    // aktualizacja passy (streak)
-    const today = now.toDateString();
-    let newStreak = { ...settings.streak };
-    if (settings.streak.lastStudyDate !== today) {
-      const last = settings.streak.lastStudyDate ? new Date(settings.streak.lastStudyDate) : null;
-      const isYesterday = last && (now - last) / 86400000 <= 1.5 && (now - last) / 86400000 >= 0.5;
-      newStreak = {
-        count: isYesterday ? settings.streak.count + 1 : 1,
-        lastStudyDate: today,
-      };
-      const newSettings = { ...settings, streak: newStreak };
-      setSettings(newSettings);
-      saveKey('app-settings', newSettings);
-    }
+      // aktualizacja passy (streak) na starcie dnia
+      const now = new Date();
+      const today = now.toDateString();
+      if (st.streak.lastStudyDate !== today) {
+        const last = st.streak.lastStudyDate ? new Date(st.streak.lastStudyDate) : null;
+        const isYesterday = last && (now - last) / 86400000 <= 1.5 && (now - last) / 86400000 >= 0.5;
+        st.streak = { count: isYesterday ? st.streak.count + 1 : 1, lastStudyDate: today };
+        saveKey('app-settings', st);
+      }
 
+      const combined = buildSessionFor(wordsLocal, pr, st);
+
+      setCustomWords(cw);
+      setProgress(pr);
+      setSettings(st);
+      setQueue(combined);
+      setSessionStats({ reviewed: 0, dontKnow: 0, medium: 0, know: 0 });
+      setScreenState(combined.length === 0 ? 'empty' : 'question');
+      setLoading(false);
+    })();
+  }, []);
+
+  const allWords = [...BUILTIN_WORDS, ...customWords];
+
+  const startSession = useCallback(() => {
+    const combined = buildSessionFor(allWords, progress, settings);
     setQueue(combined);
     setSessionStats({ reviewed: 0, dontKnow: 0, medium: 0, know: 0 });
     setScreenState(combined.length === 0 ? 'empty' : 'question');
-  }, [buildPool, progress, settings]);
-
-  useEffect(() => {
-    if (!loading && !initializedRef.current) {
-      initializedRef.current = true;
-      startSession();
-    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading]);
+  }, [allWords, progress, settings]);
 
   function onRate(rating) {
     const current = queue[0];
