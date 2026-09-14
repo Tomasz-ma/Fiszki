@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Volume2, X, Minus, Check, BarChart3, Layers, Settings as SettingsIcon, BookOpen, Flame, Plus, Trash2, RotateCcw, ArrowLeftRight } from 'lucide-react';
 import { TOPICS, BUILTIN_WORDS, LEVELS } from './wordsData.js';
 
@@ -39,7 +39,7 @@ function defaultProgress() {
 }
 
 /** Rdzeń algorytmu — patrz specyfikacja, sekcja 3.2 / 3.3 */
-function applyRating(progress, rating, now) {
+function applyRating(progress, rating, now, settingsArg) {
   const p = { ...progress };
 
   if (rating === 'DONT_KNOW') {
@@ -49,7 +49,7 @@ function applyRating(progress, rating, now) {
     if (p.status === STATUS.MASTERED) p.masteredStep = 0;
     p.status = STATUS.LEARNING;
     p.dueAt = now.toISOString();
-    return { progress: p, reinsertOffset: randInt(2, 3), leavesSession: false };
+    return { progress: p, reinsertOffset: settingsArg.dontKnowInterval, leavesSession: false };
   }
 
   if (rating === 'MEDIUM') {
@@ -62,7 +62,7 @@ function applyRating(progress, rating, now) {
       p.intervalDays = 1;
     }
     p.dueAt = daysFromNow(p.intervalDays || 1);
-    return { progress: p, reinsertOffset: randInt(6, 10), leavesSession: false };
+    return { progress: p, reinsertOffset: settingsArg.mediumInterval, leavesSession: false };
   }
 
   // KNOW
@@ -128,6 +128,8 @@ const DATA_VERSION = 2; // podbite przy dużej aktualizacji bazy słówek (reset
 
 const DEFAULT_SETTINGS = {
   dailyGoal: 12,
+  dontKnowInterval: 3,
+  mediumInterval: 8,
   activeCategories: CATEGORIES.map((c) => c.id),
   activeLevels: [...LEVELS],
   directions: { enToPl: true, plToEn: false },
@@ -147,6 +149,7 @@ export default function App() {
   const [view, setView] = useState('study');
 
   const [queue, setQueue] = useState(null); // null = nie rozpoczęto
+  const [backlog, setBacklog] = useState([]); // słówka czekające na wejście do kolejki (utrzymują stały rozmiar kolejki)
   const [screenState, setScreenState] = useState('question');
   const [sessionStats, setSessionStats] = useState({ reviewed: 0, dontKnow: 0, medium: 0, know: 0 });
 
@@ -162,6 +165,10 @@ export default function App() {
     return pool;
   }
 
+  // Zwraca { queue, backlog }: queue to stała "wystawka" o rozmiarze dailyGoal,
+  // backlog to reszta słówek czekających — gdy karta w queue zostaje oznaczona
+  // jako "Znam" i opuszcza kolejkę, na jej miejsce wchodzi kolejna z backlogu,
+  // dzięki czemu liczba kart w kolejce pozostaje stała aż do wyczerpania puli.
   function buildSessionFor(wordsArg, progressArg, settingsArg) {
     const now = new Date();
     const pool = buildPoolFor(wordsArg, settingsArg);
@@ -180,8 +187,13 @@ export default function App() {
     });
 
     dueItems.sort((a, b) => new Date(a.dueAt) - new Date(b.dueAt));
-    const limitedNew = shuffle(newItems).slice(0, settingsArg.dailyGoal);
-    return interleave(dueItems, limitedNew, 3);
+    const limitedNew = shuffle(newItems).slice(0, Math.max(settingsArg.dailyGoal * 3, settingsArg.dailyGoal));
+    const fullList = interleave(dueItems, limitedNew, 3);
+
+    return {
+      queue: fullList.slice(0, settingsArg.dailyGoal),
+      backlog: fullList.slice(settingsArg.dailyGoal),
+    };
   }
 
   useEffect(() => {
@@ -214,14 +226,15 @@ export default function App() {
         saveKey('app-settings', st);
       }
 
-      const combined = buildSessionFor(wordsLocal, pr, st);
+      const built = buildSessionFor(wordsLocal, pr, st);
 
       setCustomWords(cw);
       setProgress(pr);
       setSettings(st);
-      setQueue(combined);
+      setQueue(built.queue);
+      setBacklog(built.backlog);
       setSessionStats({ reviewed: 0, dontKnow: 0, medium: 0, know: 0 });
-      setScreenState(combined.length === 0 ? 'empty' : 'question');
+      setScreenState(built.queue.length === 0 ? 'empty' : 'question');
       setLoading(false);
     })();
   }, []);
@@ -229,12 +242,31 @@ export default function App() {
   const allWords = [...BUILTIN_WORDS, ...customWords];
 
   const startSession = useCallback(() => {
-    const combined = buildSessionFor(allWords, progress, settings);
-    setQueue(combined);
+    const built = buildSessionFor(allWords, progress, settings);
+    setQueue(built.queue);
+    setBacklog(built.backlog);
     setSessionStats({ reviewed: 0, dontKnow: 0, medium: 0, know: 0 });
-    setScreenState(combined.length === 0 ? 'empty' : 'question');
+    setScreenState(built.queue.length === 0 ? 'empty' : 'question');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allWords, progress, settings]);
+
+  const settingsBootRef = useRef(true);
+  useEffect(() => {
+    if (loading) return;
+    if (settingsBootRef.current) {
+      settingsBootRef.current = false;
+      return;
+    }
+    // Punkt 3: zmiana kierunku nauki / kategorii / poziomu natychmiast przebudowuje kolejkę
+    startSession();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    loading,
+    settings.directions.enToPl,
+    settings.directions.plToEn,
+    settings.activeCategories.join(','),
+    settings.activeLevels.join(','),
+  ]);
 
   function onRate(rating) {
     const current = queue[0];
@@ -242,21 +274,29 @@ export default function App() {
     const p = progress[key] || defaultProgress();
     const now = new Date();
 
-    const { progress: updated, reinsertOffset } = applyRating(p, rating, now);
+    const { progress: updated, reinsertOffset, leavesSession } = applyRating(p, rating, now, settings);
     const newProgress = { ...progress, [key]: updated };
     setProgress(newProgress);
     saveKey('progress-data', newProgress);
 
-    const rest = queue.slice(1);
+    let rest = queue.slice(1);
+    let newBacklog = backlog;
+
     if (reinsertOffset !== null) {
       const pos = Math.min(reinsertOffset, rest.length);
       rest.splice(pos, 0, current);
+    } else if (leavesSession && backlog.length > 0) {
+      // punkt 2: karta odeszła (Znam) -> uzupełniamy kolejkę kolejną z backlogu,
+      // żeby liczba kart w kolejce pozostała stała
+      rest = [...rest, backlog[0]];
+      newBacklog = backlog.slice(1);
     }
 
     const statKey = rating === 'DONT_KNOW' ? 'dontKnow' : rating === 'MEDIUM' ? 'medium' : 'know';
     setSessionStats((s) => ({ ...s, reviewed: s.reviewed + 1, [statKey]: s[statKey] + 1 }));
 
     setQueue(rest);
+    setBacklog(newBacklog);
     setScreenState(rest.length === 0 ? 'summary' : 'question');
   }
 
@@ -305,11 +345,17 @@ export default function App() {
   }, 0);
 
   const statusCounts = { NEW: 0, LEARNING: 0, REVIEW: 0, MASTERED: 0 };
+  const statusCountsByDirection = {
+    enToPl: { NEW: 0, LEARNING: 0, REVIEW: 0, MASTERED: 0 },
+    plToEn: { NEW: 0, LEARNING: 0, REVIEW: 0, MASTERED: 0 },
+  };
   allWords.forEach((w) => {
     ['enToPl', 'plToEn'].forEach((dir) => {
       if (!settings.directions[dir]) return;
       const p = progress[progressKey(dir, w.id)];
-      statusCounts[p ? p.status : 'NEW'] += 1;
+      const status = p ? p.status : 'NEW';
+      statusCounts[status] += 1;
+      statusCountsByDirection[dir][status] += 1;
     });
   });
 
@@ -345,7 +391,9 @@ export default function App() {
             onRestart={startSession}
           />
         )}
-        {view === 'stats' && <StatsView counts={statusCounts} streak={settings.streak} />}
+        {view === 'stats' && (
+          <StatsView counts={statusCounts} streak={settings.streak} byDirection={statusCountsByDirection} directions={settings.directions} />
+        )}
         {view === 'decks' && (
           <DecksView
             categories={CATEGORIES}
@@ -494,7 +542,7 @@ function SummaryStat({ label, value, color }) {
 /* WIDOK: STATYSTYKI                                                       */
 /* ---------------------------------------------------------------------- */
 
-function StatsView({ counts, streak }) {
+function StatsView({ counts, streak, byDirection, directions }) {
   const total = counts.NEW + counts.LEARNING + counts.REVIEW + counts.MASTERED || 1;
   const rows = [
     { key: 'NEW', label: 'Nowe', color: COLORS.inkMuted },
@@ -502,6 +550,9 @@ function StatsView({ counts, streak }) {
     { key: 'REVIEW', label: 'Powtarzane', color: COLORS.accentMedium },
     { key: 'MASTERED', label: 'Opanowane', color: COLORS.accentKnow },
   ];
+
+  const activeDirections = ['enToPl', 'plToEn'].filter((d) => directions[d]);
+  const directionLabel = { enToPl: 'EN → PL', plToEn: 'PL → EN' };
 
   return (
     <div style={styles.sectionWrap}>
@@ -528,6 +579,32 @@ function StatsView({ counts, streak }) {
           </div>
         ))}
       </div>
+
+      {activeDirections.length > 1 && (
+        <>
+          <h3 style={styles.subheading}>Postęp osobno wg kierunku</h3>
+          <p style={{ ...styles.sectionSubtitle, marginBottom: 14 }}>
+            Znajomość słówka w jedną stronę nie wpływa na drugą — to dwa niezależne postępy.
+          </p>
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+            {activeDirections.map((dir) => {
+              const c = byDirection[dir];
+              const dirTotal = c.NEW + c.LEARNING + c.REVIEW + c.MASTERED || 1;
+              return (
+                <div key={dir} style={styles.directionCard}>
+                  <div style={styles.directionCardTitle}>{directionLabel[dir]}</div>
+                  {rows.map((r) => (
+                    <div key={r.key} style={styles.directionRow}>
+                      <span>{r.label}</span>
+                      <span>{c[r.key]} <span style={{ color: COLORS.inkMuted }}>({Math.round((c[r.key] / dirTotal) * 100)}%)</span></span>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -636,7 +713,7 @@ function SettingsView({ settings, onUpdate }) {
       <h2 style={styles.sectionTitle}>Ustawienia</h2>
 
       <div style={styles.settingBlock}>
-        <label style={styles.settingLabel}>Dzienny cel nowych słówek</label>
+        <label style={styles.settingLabel}>Liczba słówek w kolejce jednocześnie</label>
         <input
           type="number"
           min={1}
@@ -645,6 +722,35 @@ function SettingsView({ settings, onUpdate }) {
           onChange={(e) => onUpdate({ dailyGoal: Math.max(1, Number(e.target.value) || 1) })}
           style={styles.numberInput}
         />
+        <p style={styles.fieldHint}>
+          Gdy ocenisz słówko jako "Znam", od razu wskakuje kolejne, żeby w kolejce zawsze była ta sama liczba kart.
+        </p>
+      </div>
+
+      <div style={styles.settingBlock}>
+        <label style={styles.settingLabel}>Co ile kart powtarzać słówko, którego nie znasz</label>
+        <input
+          type="number"
+          min={1}
+          max={50}
+          value={settings.dontKnowInterval}
+          onChange={(e) => onUpdate({ dontKnowInterval: Math.max(1, Number(e.target.value) || 1) })}
+          style={styles.numberInput}
+        />
+        <p style={styles.fieldHint}>Domyślnie 3 — słówko wraca bardzo szybko, w tej samej sesji.</p>
+      </div>
+
+      <div style={styles.settingBlock}>
+        <label style={styles.settingLabel}>Co ile kart powtarzać słówko, które znasz średnio</label>
+        <input
+          type="number"
+          min={1}
+          max={50}
+          value={settings.mediumInterval}
+          onChange={(e) => onUpdate({ mediumInterval: Math.max(1, Number(e.target.value) || 1) })}
+          style={styles.numberInput}
+        />
+        <p style={styles.fieldHint}>Domyślnie 8 — rzadziej niż "Nie znam", ale nadal w tej samej sesji.</p>
       </div>
 
       <div style={styles.settingBlock}>
@@ -1039,6 +1145,15 @@ const styles = {
     overflow: 'hidden',
   },
   barFill: { height: '100%', borderRadius: 20 },
+  directionCard: {
+    flex: '1 1 140px',
+    background: COLORS.paperCard,
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 4,
+    padding: '12px 14px',
+  },
+  directionCardTitle: { fontWeight: 700, fontSize: 13, marginBottom: 8 },
+  directionRow: { display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '3px 0' },
   categoryList: { display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 24 },
   categoryRow: {
     display: 'flex',
@@ -1093,6 +1208,7 @@ const styles = {
   trashButton: { background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex' },
   settingBlock: { marginBottom: 24 },
   settingLabel: { display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 10 },
+  fieldHint: { fontSize: 12, color: COLORS.inkMuted, marginTop: 6, lineHeight: 1.4 },
   numberInput: {
     width: 80,
     padding: '8px 10px',
