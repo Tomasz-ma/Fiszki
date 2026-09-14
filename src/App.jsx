@@ -1,45 +1,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Volume2, X, Minus, Check, BarChart3, Layers, Settings as SettingsIcon, BookOpen, Flame, Plus, Trash2, RotateCcw, ArrowLeftRight } from 'lucide-react';
+import { TOPICS, BUILTIN_WORDS, LEVELS } from './wordsData.js';
 
 /* ---------------------------------------------------------------------- */
-/* DANE / SŁOWNICTWO                                                       */
+/* DANE / SŁOWNICTWO — patrz plik wordsData.js (955 słówek, 30 kategorii)  */
 /* ---------------------------------------------------------------------- */
 
-const CATEGORIES = [
-  { id: 'podstawy', name: 'Podstawy' },
-  { id: 'podroze', name: 'Podróże' },
-  { id: 'biznes', name: 'Biznes' },
-  { id: 'wlasne', name: 'Moje słówka' },
-];
-
-const BUILTIN_WORDS = [
-  { id: 'w1', en: 'apple', pl: 'jabłko', category: 'podstawy' },
-  { id: 'w2', en: 'window', pl: 'okno', category: 'podstawy' },
-  { id: 'w3', en: 'to run', pl: 'biegać', category: 'podstawy' },
-  { id: 'w4', en: 'happy', pl: 'szczęśliwy', category: 'podstawy' },
-  { id: 'w5', en: 'kitchen', pl: 'kuchnia', category: 'podstawy' },
-  { id: 'w6', en: 'to forget', pl: 'zapominać', category: 'podstawy' },
-  { id: 'w7', en: 'quiet', pl: 'cichy', category: 'podstawy' },
-  { id: 'w8', en: 'bridge', pl: 'most', category: 'podstawy' },
-  { id: 'w9', en: 'to borrow', pl: 'pożyczać', category: 'podstawy' },
-  { id: 'w10', en: 'shadow', pl: 'cień', category: 'podstawy' },
-  { id: 'w11', en: 'luggage', pl: 'bagaż', category: 'podroze' },
-  { id: 'w12', en: 'departure', pl: 'odlot / odjazd', category: 'podroze' },
-  { id: 'w13', en: 'boarding pass', pl: 'karta pokładowa', category: 'podroze' },
-  { id: 'w14', en: 'to book', pl: 'rezerwować', category: 'podroze' },
-  { id: 'w15', en: 'accommodation', pl: 'zakwaterowanie', category: 'podroze' },
-  { id: 'w16', en: 'delayed', pl: 'opóźniony', category: 'podroze' },
-  { id: 'w17', en: 'customs', pl: 'odprawa celna', category: 'podroze' },
-  { id: 'w18', en: 'itinerary', pl: 'plan podróży', category: 'podroze' },
-  { id: 'w19', en: 'invoice', pl: 'faktura', category: 'biznes' },
-  { id: 'w20', en: 'deadline', pl: 'termin ostateczny', category: 'biznes' },
-  { id: 'w21', en: 'shareholder', pl: 'akcjonariusz', category: 'biznes' },
-  { id: 'w22', en: 'to negotiate', pl: 'negocjować', category: 'biznes' },
-  { id: 'w23', en: 'revenue', pl: 'przychód', category: 'biznes' },
-  { id: 'w24', en: 'to outsource', pl: 'zlecać na zewnątrz', category: 'biznes' },
-  { id: 'w25', en: 'liability', pl: 'odpowiedzialność (prawna)', category: 'biznes' },
-  { id: 'w26', en: 'merger', pl: 'fuzja', category: 'biznes' },
-];
+const CATEGORIES = TOPICS;
 
 /* ---------------------------------------------------------------------- */
 /* STAŁE ALGORYTMU SRS                                                     */
@@ -157,11 +124,15 @@ async function saveKey(key, value) {
   }
 }
 
+const DATA_VERSION = 2; // podbite przy dużej aktualizacji bazy słówek (reset wyboru kategorii/poziomów)
+
 const DEFAULT_SETTINGS = {
   dailyGoal: 12,
-  activeCategories: ['podstawy', 'podroze', 'biznes', 'wlasne'],
+  activeCategories: CATEGORIES.map((c) => c.id),
+  activeLevels: [...LEVELS],
   directions: { enToPl: true, plToEn: false },
   streak: { count: 0, lastStudyDate: null },
+  dataVersion: DATA_VERSION,
 };
 
 /* ---------------------------------------------------------------------- */
@@ -180,7 +151,9 @@ export default function App() {
   const [sessionStats, setSessionStats] = useState({ reviewed: 0, dontKnow: 0, medium: 0, know: 0 });
 
   function buildPoolFor(wordsArg, settingsArg) {
-    const active = wordsArg.filter((w) => settingsArg.activeCategories.includes(w.category));
+    const active = wordsArg.filter(
+      (w) => settingsArg.activeCategories.includes(w.category) && (!w.level || settingsArg.activeLevels.includes(w.level))
+    );
     const pool = [];
     active.forEach((w) => {
       if (settingsArg.directions.enToPl) pool.push({ word: w, direction: 'enToPl' });
@@ -219,15 +192,25 @@ export default function App() {
         loadKey('app-settings', DEFAULT_SETTINGS),
       ]);
       const st = { ...DEFAULT_SETTINGS, ...stRaw, directions: { ...DEFAULT_SETTINGS.directions, ...(stRaw.directions || {}) } };
+      const migrated = !stRaw.dataVersion || stRaw.dataVersion < DATA_VERSION;
+      if (migrated) {
+        st.activeCategories = DEFAULT_SETTINGS.activeCategories;
+        st.activeLevels = DEFAULT_SETTINGS.activeLevels;
+        st.dataVersion = DATA_VERSION;
+      }
       const wordsLocal = [...BUILTIN_WORDS, ...cw];
 
       // aktualizacja passy (streak) na starcie dnia
       const now = new Date();
       const today = now.toDateString();
+      let streakChanged = false;
       if (st.streak.lastStudyDate !== today) {
         const last = st.streak.lastStudyDate ? new Date(st.streak.lastStudyDate) : null;
         const isYesterday = last && (now - last) / 86400000 <= 1.5 && (now - last) / 86400000 >= 0.5;
         st.streak = { count: isYesterday ? st.streak.count + 1 : 1, lastStudyDate: today };
+        streakChanged = true;
+      }
+      if (migrated || streakChanged) {
         saveKey('app-settings', st);
       }
 
@@ -302,6 +285,16 @@ export default function App() {
     updateSettings({ activeCategories: next });
   }
 
+  function toggleLevel(id) {
+    const has = settings.activeLevels.includes(id);
+    const next = has ? settings.activeLevels.filter((c) => c !== id) : [...settings.activeLevels, id];
+    updateSettings({ activeLevels: next });
+  }
+
+  function setAllCategories(ids) {
+    updateSettings({ activeCategories: ids });
+  }
+
   const dueCount = allWords.reduce((acc, w) => {
     ['enToPl', 'plToEn'].forEach((dir) => {
       if (!settings.directions[dir]) return;
@@ -358,9 +351,13 @@ export default function App() {
             categories={CATEGORIES}
             active={settings.activeCategories}
             onToggle={toggleCategory}
+            levels={LEVELS}
+            activeLevels={settings.activeLevels}
+            onToggleLevel={toggleLevel}
             customWords={customWords}
             onAdd={addCustomWord}
             onRemove={removeCustomWord}
+            onSetAllCategories={setAllCategories}
           />
         )}
         {view === 'settings' && (
@@ -539,15 +536,48 @@ function StatsView({ counts, streak }) {
 /* WIDOK: ZESTAWY / SŁÓWKA                                                 */
 /* ---------------------------------------------------------------------- */
 
-function DecksView({ categories, active, onToggle, customWords, onAdd, onRemove }) {
+function DecksView({ categories, active, onToggle, levels, activeLevels, onToggleLevel, customWords, onAdd, onRemove, onSetAllCategories }) {
   const [en, setEn] = useState('');
   const [pl, setPl] = useState('');
+
+  const LEVEL_LABELS = {
+    A1: 'A1 – Początkujący',
+    A2: 'A2 – Podstawowy',
+    B1: 'B1 – Średnio zaawansowany',
+    B2: 'B2 – Wyżej średnio zaawansowany',
+  };
 
   return (
     <div style={styles.sectionWrap}>
       <h2 style={styles.sectionTitle}>Zestawy</h2>
-      <p style={styles.sectionSubtitle}>Wybierz, z których zestawów mają pochodzić słówka w sesji nauki.</p>
+      <p style={styles.sectionSubtitle}>Wybierz poziom trudności oraz zestawy tematyczne, z których mają pochodzić słówka.</p>
 
+      <h3 style={styles.subheading}>Poziom trudności</h3>
+      <div style={{ ...styles.categoryList, marginBottom: 22 }}>
+        {levels.map((lvl) => (
+          <label key={lvl} style={styles.categoryRow}>
+            <input
+              type="checkbox"
+              checked={activeLevels.includes(lvl)}
+              onChange={() => onToggleLevel(lvl)}
+              style={styles.checkbox}
+            />
+            <span>{LEVEL_LABELS[lvl] || lvl}</span>
+          </label>
+        ))}
+      </div>
+
+      <div style={styles.decksHeaderRow}>
+        <h3 style={styles.subheading}>Zestawy tematyczne</h3>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button style={styles.linkButton} onClick={() => onSetAllCategories(categories.map((c) => c.id))}>
+            Zaznacz wszystkie
+          </button>
+          <button style={styles.linkButton} onClick={() => onSetAllCategories([])}>
+            Odznacz wszystkie
+          </button>
+        </div>
+      </div>
       <div style={styles.categoryList}>
         {categories.map((c) => (
           <label key={c.id} style={styles.categoryRow}>
@@ -1019,6 +1049,16 @@ const styles = {
   },
   checkbox: { width: 16, height: 16, accentColor: COLORS.accentPrimary },
   subheading: { fontSize: 15, fontWeight: 700, marginBottom: 10, fontFamily: "-apple-system, 'Segoe UI', sans-serif" },
+  decksHeaderRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
+  linkButton: {
+    background: 'transparent',
+    border: 'none',
+    color: COLORS.accentPrimary,
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'pointer',
+    padding: 0,
+  },
   addWordForm: { display: 'flex', gap: 8, marginBottom: 14 },
   textInput: {
     flex: 1,
